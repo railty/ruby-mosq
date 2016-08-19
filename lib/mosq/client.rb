@@ -6,37 +6,39 @@ require_relative 'client/bucket'
 
 module Mosq
   class Client
-    
+
     # Raised when an operation is performed on an already-destroyed {Client}.
     class DestroyedError < RuntimeError; end
-    
+
     # Create a new {Client} instance with the given properties.
     def initialize(*args)
+      puts "mosquitto version 1.4.9"
+      puts "gem version 0.2.4"
       @options = Util.connection_info(*args)
-      
+
       @options[:max_in_flight] ||= 20 # messages
       @options[:heartbeat]     ||= 30 # seconds
       @protocol_timeout = DEFAULT_PROTOCOL_TIMEOUT
-      
+
       Util.null_check "creating the client",
-        (@ptr = FFI.mosquitto_new(@options[:client_id], true, nil))
-      
+        (@ptr = FFI.mosquitto_new(@options[:client_id], @options[:clean_session], nil))
+
       @bucket = Bucket.new(@ptr)
       @event_handlers = {}
-      
+
       @packet_id_ptr = Util.mem_ptr(:int)
-      
+
       @finalizer = self.class.create_finalizer_for(@ptr)
       ObjectSpace.define_finalizer(self, @finalizer)
     end
-    
+
     # @api private
     def self.create_finalizer_for(ptr)
       Proc.new do
         FFI.mosquitto_destroy(ptr)
       end
     end
-    
+
     def username;      @options.fetch(:username);      end
     def password;      @options.fetch(:password);      end
     def host;          @options.fetch(:host);          end
@@ -44,59 +46,59 @@ module Mosq
     def ssl?;          @options.fetch(:ssl);           end
     def heartbeat;     @options.fetch(:heartbeat);     end
     def max_in_flight; @options.fetch(:max_in_flight); end
-    
+
     # The maximum time interval the user application should wait between
     # yielding control back to the client object by calling methods like
     # {#run_loop!} and {#run_immediate!}.
     def max_poll_interval
       @options.fetch(:heartbeat) / 2.0
     end
-    
+
     def ptr
       raise DestroyedError unless @ptr
       @ptr
     end
     private :ptr
-    
+
     def start_configure
       Util.error_check "configuring the maximum number of inflight messages",
         FFI.mosquitto_max_inflight_messages_set(ptr, @options[:max_in_flight])
-      
+
       Util.error_check "configuring the username and password",
         FFI.mosquitto_username_pw_set(ptr, @options[:username], @options[:password])
-      
+
       Util.error_check "connecting to #{@options[:host]}",
         FFI.mosquitto_connect(ptr, @options[:host], @options[:port], @options[:heartbeat])
     end
     private :start_configure
-    
+
     # Initiate the connection with the server.
     # It is necessary to call this before any other communication.
     def start
       start_configure
-      
+
       @ruby_socket = Socket.for_fd(FFI.mosquitto_socket(ptr))
       @ruby_socket.autoclose = false
-      
+
       res = fetch_response(:connect, nil)
       raise Mosq::FFI::Error::NoConn, res.fetch(:message) \
         unless res.fetch(:status) == 0
-      
+
       self
     end
-    
+
     # Gracefully close the connection with the server.
     def close
       @ruby_socket = nil
-      
+
       Util.error_check "closing the connection to #{@options[:host]}",
         FFI.mosquitto_disconnect(ptr)
-      
+
       self
     rescue Mosq::FFI::Error::NoConn
       self
     end
-    
+
     # Free the native resources associated with this object. This will
     # be done automatically on garbage collection if not called explicitly.
     def destroy
@@ -105,10 +107,10 @@ module Mosq
         ObjectSpace.undefine_finalizer(self)
       end
       @ptr = @finalizer = @ruby_socket = @bucket = nil
-      
+
       self
     end
-    
+
     # Register a handler for events on the given channel of the given type.
     # Only one handler for each event type may be registered at a time.
     # If no callable or block is given, the handler will be cleared.
@@ -123,12 +125,12 @@ module Mosq
       handler = block || callable
       raise ArgumentError, "expected block or callable as the event handler" \
         unless handler.respond_to?(:call)
-      
+
       @event_handlers[type.to_sym] = handler
       handler
     end
     alias_method :on, :on_event
-    
+
     # Unregister the event handler associated with the given channel and method.
     #
     # @param type [Symbol] The type of protocol method to watch for.
@@ -137,13 +139,13 @@ module Mosq
     def clear_event_handler(type)
       @event_handlers.delete(type.to_sym)
     end
-    
+
     # The timeout to use when waiting for protocol events, in seconds.
     # By default, this has the value of {DEFAULT_PROTOCOL_TIMEOUT}.
     # When set, it affects operations like {#run_loop!}.
     attr_accessor :protocol_timeout
     DEFAULT_PROTOCOL_TIMEOUT = 30 # seconds
-    
+
     # Subscribe to the given topic. Messages with matching topic will be
     # delivered to the {:message} event handler registered with {on_event}.
     #
@@ -154,12 +156,12 @@ module Mosq
     def subscribe(topic, qos: 0)
       Util.error_check "subscribing to a topic",
         FFI.mosquitto_subscribe(ptr, @packet_id_ptr, topic, qos)
-      
+
       fetch_response(:subscribe, @packet_id_ptr.read_int)
-      
+
       self
     end
-    
+
     # Unsubscribe from the given topic.
     #
     # @param topic [String] The topic patten to unsubscribe from.
@@ -168,12 +170,12 @@ module Mosq
     def unsubscribe(topic)
       Util.error_check "unsubscribing from a topic",
         FFI.mosquitto_unsubscribe(ptr, @packet_id_ptr, topic)
-      
+
       fetch_response(:unsubscribe, @packet_id_ptr.read_int)
-      
+
       self
     end
-    
+
     # Publish a message with the given topic and payload.
     #
     # @param topic [String] The topic to publish on.
@@ -186,12 +188,12 @@ module Mosq
       Util.error_check "publishing a message",
         FFI.mosquitto_publish(ptr, @packet_id_ptr,
           topic, payload.bytesize, payload, qos, retain)
-      
+
       fetch_response(:publish, @packet_id_ptr.read_int)
-      
+
       self
     end
-    
+
     # Subscribe to many topics. This is more performant than many calls
     # to {#subscribe}, as the transactions occur concurrently.
     #
@@ -204,15 +206,15 @@ module Mosq
       topics.each do |topic|
         Util.error_check "subscribing to many topics",
           FFI.mosquitto_subscribe(ptr, @packet_id_ptr, topic, qos)
-        
+
         packet_ids << @packet_id_ptr.read_int
       end
-      
+
       fetch_responses(:subscribe, packet_ids)
-      
+
       self
     end
-    
+
     # Unsubscribe from many topics. This is more performant than many calls
     # to {#unsubscribe}, as the transactions occur concurrently.
     #
@@ -224,15 +226,15 @@ module Mosq
       topics.each do |topic|
         Util.error_check "subscribing to many topics",
           FFI.mosquitto_unsubscribe(ptr, @packet_id_ptr, topic)
-        
+
         packet_ids << @packet_id_ptr.read_int
       end
-      
+
       fetch_responses(:unsubscribe, packet_ids)
-      
+
       self
     end
-    
+
     # Publish many pairs of topic/payload as messages. This is more performant
     # than many calls to {#publish}, as the transactions occur concurrently.
     #
@@ -247,15 +249,15 @@ module Mosq
         Util.error_check "publishing many messages",
           FFI.mosquitto_publish(ptr, @packet_id_ptr,
             topic, payload.bytesize, payload, qos, retain)
-        
+
         packet_ids << @packet_id_ptr.read_int
       end
-      
+
       fetch_responses(:publish, packet_ids)
-      
+
       self
     end
-    
+
     # Fetch and handle events in a loop that blocks the calling thread.
     # The loop will continue until the {#break!} method is called from within
     # an event handler, or until the given timeout duration has elapsed.
@@ -276,7 +278,7 @@ module Mosq
       fetch_events(timeout, &block)
       nil
     end
-    
+
     # Yield control to the client object to do any connection-oriented work
     # that needs to be done, including heartbeating. This is the same as
     # calling {#run_loop!} with no block and a timeout of 0.
@@ -284,7 +286,7 @@ module Mosq
     def run_immediate!
       run_loop!(timeout: 0)
     end
-    
+
     # Stop iterating from within an execution of the {#run_loop!} method.
     # Call this method only from within an event handler.
     # It will take effect only after the handler finishes running.
@@ -295,16 +297,16 @@ module Mosq
       @breaking = true
       nil
     end
-    
+
     private
-    
+
     # Calculate the amount of the timeout remaining from the given start time
     def remaining_timeout(timeout=0, start=Time.now)
       return nil unless timeout
       timeout = timeout - (Time.now - start)
       timeout < 0 ? 0 : timeout
     end
-    
+
     # Block until there is readable data on the internal ruby socket,
     # returning true if there is readable data, or false if time expired.
     def select(timeout=0)
@@ -313,52 +315,52 @@ module Mosq
     rescue Errno::EBADF
       false
     end
-    
+
     # Execute the handler for this type of event, if any.
     def handle_incoming_event(event)
       if (handler = (@event_handlers[event.fetch(:type)]))
         handler.call(event)
       end
     end
-    
+
     def connection_housekeeping
       # Do any pending outbound writes.
       while FFI.mosquitto_want_write(ptr)
         Util.error_check "sending outbound packets",
           FFI.mosquitto_loop_write(ptr, 1)
       end
-      
+
       # Do any pending stateful protocol packets.
       Util.error_check "handling stateful protocol packets",
         FFI.mosquitto_loop_misc(ptr)
     end
-    
+
     # Return the next incoming event as a Hash, or nil if time expired.
     def fetch_next_event(timeout=0, start=Time.now)
       max_timeout = max_poll_interval
-      
+
       # Check if any data is immediately available to read
       if select(0)
         Util.error_check "reading immediate inbound packets",
           FFI.mosquitto_loop_read(ptr, 1)
       end
-      
+
       while true
         connection_housekeeping
-        
+
         # Check for an event already waiting in the bucket
         return @bucket.events.shift unless @bucket.events.empty?
-        
+
         # Calculate remaining timeout and break if breaking or time expired.
         remaining = remaining_timeout(timeout, start)
         return nil if remaining && remaining <= 0
-        
+
         # Wait for data to arrive on the socket.
         select_timeout = remaining ? [remaining, max_timeout].min : nil
         if select(select_timeout)
           Util.error_check "reading inbound packets",
             FFI.mosquitto_loop_read(ptr, 1)
-          
+
           unless @bucket.events.empty?
             connection_housekeeping
             return @bucket.events.shift
@@ -366,7 +368,7 @@ module Mosq
         end
       end
     end
-    
+
     # Internal implementation of the {#run_loop!} method.
     def fetch_events(timeout=protocol_timeout, start=Time.now)
       while (event = fetch_next_event(timeout, start))
@@ -375,12 +377,12 @@ module Mosq
         break if @breaking
       end
     end
-    
+
     # Internal implementation of synchronous responses.
     def fetch_response(expected_type, expected_packet_id,
                        timeout=protocol_timeout, start=Time.now)
       unwanted_events = []
-      
+
       while (event = fetch_next_event(timeout, start))
         if (event.fetch(:type) == expected_type) && (
           !expected_packet_id ||
@@ -393,17 +395,17 @@ module Mosq
           unwanted_events.push(event)
         end
       end
-      
+
       raise FFI::Error::Timeout, "waiting for #{expected_type} response"
     end
-    
+
     # Internal implementation of multiple outstanding synchronous responses.
     def fetch_responses(expected_type, expected_packet_ids,
                         timeout=protocol_timeout, start=Time.now)
       return [] if expected_packet_ids.empty?
       unwanted_events = []
       wanted_events   = []
-      
+
       while (event = fetch_next_event(timeout, start))
         if (event.fetch(:type) == expected_type) && (
             expected_packet_ids.include?(event.fetch(:packet_id))
@@ -412,17 +414,17 @@ module Mosq
         else
           unwanted_events.push(event)
         end
-        
+
         if wanted_events.size >= expected_packet_ids.size
           unwanted_events.reverse_each { |e| @bucket.events.unshift(e) }
           wanted_events.each do |event|
             handle_incoming_event(event)
           end
-          
+
           return wanted_events
         end
       end
-      
+
       raise FFI::Error::Timeout, "waiting for #{expected_type} responses"
     end
   end
