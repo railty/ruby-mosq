@@ -18,6 +18,8 @@ module Mosq
 
       @options[:max_in_flight] ||= 20 # messages
       @options[:heartbeat]     ||= 30 # seconds
+      @options[:clean_session] ||= false
+      @options[:client_id]     ||= nil
       @protocol_timeout = DEFAULT_PROTOCOL_TIMEOUT
 
       Util.null_check "creating the client",
