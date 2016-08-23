@@ -20,6 +20,8 @@ module Mosq
       @options[:heartbeat]     ||= 30 # seconds
       @options[:clean_session] ||= false
       @options[:client_id]     ||= nil
+      puts @options[:client_id]
+      puts @options
       @protocol_timeout = DEFAULT_PROTOCOL_TIMEOUT
 
       Util.null_check "creating the client",
