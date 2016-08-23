@@ -13,7 +13,7 @@ module Mosq
     # Create a new {Client} instance with the given properties.
     def initialize(*args)
       puts "mosquitto version 1.4.9"
-      puts "gem version 0.2.4"
+      puts "gem version 0.2.5"
       @options = Util.connection_info(*args)
 
       @options[:max_in_flight] ||= 20 # messages
